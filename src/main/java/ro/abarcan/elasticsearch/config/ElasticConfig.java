@@ -6,20 +6,24 @@ import co.elastic.clients.transport.ElasticsearchTransport;
 import co.elastic.clients.transport.rest_client.RestClientTransport;
 import org.apache.http.HttpHost;
 import org.elasticsearch.client.RestClient;
+import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 @Configuration
 public class ElasticConfig {
 
-    RestClient restClient = RestClient
-            .builder(HttpHost.create("http://localhost:9200"))
-            .build();
+    @Bean
+    public RestClient restClient() {
+        return RestClient.builder(HttpHost.create("http://localhost:9200")).build();
+    }
 
-    // Create the transport with a Jackson mapper
-    ElasticsearchTransport transport = new RestClientTransport(
-            restClient, new JacksonJsonpMapper());
+    @Bean
+    public ElasticsearchTransport transport(RestClient restClient) {
+        return new RestClientTransport(restClient, new JacksonJsonpMapper());
+    }
 
-    // And create the API client
-    ElasticsearchClient esClient = new ElasticsearchClient(transport);
-
+    @Bean
+    public ElasticsearchClient elasticsearchClient(ElasticsearchTransport transport) {
+        return new ElasticsearchClient(transport);
+    }
 }

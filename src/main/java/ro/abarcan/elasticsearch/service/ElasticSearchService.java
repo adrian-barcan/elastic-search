@@ -2,21 +2,21 @@ package ro.abarcan.elasticsearch.service;
 
 import co.elastic.clients.elasticsearch.ElasticsearchClient;
 import co.elastic.clients.elasticsearch.core.IndexResponse;
+import co.elastic.clients.elasticsearch.core.SearchRequest;
 import co.elastic.clients.elasticsearch.core.SearchResponse;
-import co.elastic.clients.elasticsearch.core.search.Hit;
-import co.elastic.clients.elasticsearch.core.search.TotalHits;
-import co.elastic.clients.elasticsearch.core.search.TotalHitsRelation;
 import lombok.extern.slf4j.Slf4j;
 import net.datafaker.Faker;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.Pageable;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+import org.springframework.util.ObjectUtils;
+import org.springframework.web.server.ResponseStatusException;
 import ro.abarcan.elasticsearch.domain.Employee;
 
 import java.io.IOException;
 import java.math.BigDecimal;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.IntStream;
 
@@ -24,6 +24,7 @@ import java.util.stream.IntStream;
 @Service
 public class ElasticSearchService {
 
+    private static final String EMPLOYEE_INDEX = "employee";
     private final ElasticsearchClient elasticsearchClient;
 
     public ElasticSearchService(ElasticsearchClient elasticsearchClient) {
@@ -32,83 +33,51 @@ public class ElasticSearchService {
 
     public void addEmployee(Employee employee) throws IOException {
         IndexResponse response = elasticsearchClient.index(s -> s
-                .index("employee")
+                .index(EMPLOYEE_INDEX)
                 .id(employee.getId())
                 .document(employee));
-        log.info("Indexed with version " + response.version());
+        log.info("Indexed with version {}", response.version());
     }
 
     public Page<Employee> search(String query, Pageable pageable) throws IOException {
-        if (query == null || query.isEmpty()) {
-            SearchResponse<Employee> response = elasticsearchClient.search(s -> s
-                            .index("employee")
-                            .from((int) pageable.getOffset())
-                            .size(pageable.getPageSize()),
-                    Employee.class);
-            Result result = getResult(response);
-            return new PageImpl<>(result.employeeList(), pageable, result.total().value());
-        } else {
+        final var response = elasticsearchClient.search(s -> buildSearchRequest(s, query, pageable), Employee.class);
+        return buildPage(response, pageable);
+    }
+
+    private SearchRequest.Builder buildSearchRequest(SearchRequest.Builder searchRequest,
+                                                     String query,
+                                                     Pageable pageable) {
+        searchRequest.index(EMPLOYEE_INDEX)
+                .from((int) pageable.getOffset())
+                .size(pageable.getPageSize());
+
+        if (!ObjectUtils.isEmpty(query)) {
             String finalQuery = query.toLowerCase();
-            SearchResponse<Employee> response = elasticsearchClient.search(s -> s
-                            .index("employee")
-                            .from((int) pageable.getOffset())
-                            .size(pageable.getPageSize())
-                            .query(q -> q
-                                    .bool(b -> b
-                                            .should(sh -> sh
-                                                    .wildcard(w -> w
-                                                            .field("firstName")
-                                                            .value("*" + finalQuery + "*")
-                                                    ))
-                                            .should(sh -> sh
-                                                    .wildcard(w -> w
-                                                            .field("lastName")
-                                                            .value("*" + finalQuery + "*")
-                                                    ))
-                                            .should(sh -> sh
-                                                    .wildcard(w -> w
-                                                            .field("position")
-                                                            .value("*" + finalQuery + "*")
-                                                    ))
-                                            .should(sh -> sh
-                                                    .wildcard(w -> w
-                                                            .field("city")
-                                                            .value("*" + finalQuery + "*")
-                                                    ))
-                                    )),
-                    Employee.class);
-
-            Result result = getResult(response);
-            return new PageImpl<>(result.employeeList(), pageable, result.total().value());
+            searchRequest.query(q -> q.bool(b -> b
+                    .should(sh -> sh.wildcard(w -> w.field("firstName").value("*" + finalQuery + "*")))
+                    .should(sh -> sh.wildcard(w -> w.field("lastName").value("*" + finalQuery + "*")))
+                    .should(sh -> sh.wildcard(w -> w.field("position").value("*" + finalQuery + "*")))
+                    .should(sh -> sh.wildcard(w -> w.field("city").value("*" + finalQuery + "*")))));
         }
+        return searchRequest;
     }
 
-    private static Result getResult(SearchResponse<Employee> response) {
-        TotalHits total = response.hits().total();
-        boolean isExactResult = total.relation() == TotalHitsRelation.Eq;
+    private Page<Employee> buildPage(SearchResponse<Employee> response, Pageable pageable) {
+        List<Employee> employeeList = response.hits().hits().stream()
+                .filter(hit -> hit.source() != null)
+                .map(hit -> {
+                    Employee employee = hit.source();
+                    log.info("Found employee {}, score {}", employee.getFirstName(), hit.score());
+                    return employee;
+                })
+                .toList();
 
-        if (isExactResult) {
-            log.info("There are {} results", total.value());
-        } else {
-            log.info("There are more than {} results", total.value());
-        }
-
-        List<Hit<Employee>> hits = response.hits().hits();
-
-        List<Employee> employeeList = new ArrayList<>();
-        for (Hit<Employee> hit : hits) {
-            Employee employee = hit.source();
-            log.info("Found product {}, score {}", employee.getFirstName(), hit.score());
-            employeeList.add(employee);
-        }
-        return new Result(total, employeeList);
-    }
-
-    private record Result(TotalHits total, List<Employee> employeeList) {
+        long total = response.hits().total() != null ? response.hits().total().value() : 0;
+        return new PageImpl<>(employeeList, pageable, total);
     }
 
     public void generateEmployees() {
-        Faker faker = new Faker();
+        final var faker = new Faker();
         IntStream.range(0, 1000000).parallel().forEach(i -> {
             Employee employee = new Employee();
             employee.setId(String.valueOf(i));
@@ -127,7 +96,7 @@ public class ElasticSearchService {
                 addEmployee(employee);
             } catch (IOException e) {
                 log.warn("Failed to add employee", e);
-                throw new RuntimeException(e);
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Failed to add employee", e);
             }
         });
     }
